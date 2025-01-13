@@ -130,7 +130,7 @@ def get_train_overlap(
                 total_ngrams += 1
                 [ngram, document_id] = line.rsplit(" ", 1)
                 if (
-                    ngram != current_ngram
+                    True  # ngram != current_ngram
                 ):  # Only need to match the ngram once in training set
                     unique_ngrams += 1
                     current_ngram = ngram
