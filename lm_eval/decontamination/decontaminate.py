@@ -1,3 +1,4 @@
+import argparse
 import collections
 import glob
 import json
@@ -5,6 +6,9 @@ import os
 import pickle
 import random
 import time
+
+from datasets import get_dataset_config_names, load_dataset
+from generate_13_grams import yield_pile
 
 from .archiver import ZStdTextReader
 from .janitor import Janitor, word_ngrams
@@ -34,7 +38,9 @@ def get_train_overlap_stub(docs: dict, ngrams_path: str, ngrams_n_size: str):
 # 4. Strip the task_set from the dictionary keys and return
 #
 # We cache the task+set lookups as well as the overlaps.
-def get_train_overlap(docs_by_task_set: dict, ngrams_path: str, limit: int) -> dict:
+def get_train_overlap(
+    docs_by_task_set: dict, ngrams_path: str, limit: int, output_dir: str
+) -> dict:
     # return get_train_overlap_stub(docs, ngrams_path, ngrams_n_size)
 
     info_dict_path = os.path.join(ngrams_path, "info.json")
@@ -48,15 +54,15 @@ def get_train_overlap(docs_by_task_set: dict, ngrams_path: str, limit: int) -> d
     start = time.perf_counter()
 
     def get_overlaps_dump_path(task_name, task_set, ngrams_n_size, limit) -> str:
-        return f"data/{task_name}/{task_set}_{ngrams_n_size}grams_limit{limit}.overlaps"
+        return f"{output_dir}/{task_name}/{task_set}_{ngrams_n_size}grams_limit{limit}.overlaps"
 
     lookups = {}
     duplicates = {}  # (task_name, task_set): set(doc_ids)}
     sets_to_decontaminate = len(docs_by_task_set.keys())
 
     for (task_name, task_set), docs in docs_by_task_set.items():
-        if not os.path.exists(f"data/{task_name}"):
-            os.mkdir(f"data/{task_name}")
+        if not os.path.exists(f"{output_dir}/{task_name}"):
+            os.makedirs(f"{output_dir}/{task_name}")
 
         # Check if we've decontaminated this combination before
         overlaps_dump_path = get_overlaps_dump_path(
@@ -72,9 +78,7 @@ def get_train_overlap(docs_by_task_set: dict, ngrams_path: str, limit: int) -> d
             duplicates[(task_name, task_set)] = set()
 
         # Build/load the task lookup {ngram: set(documents)}.
-        task_set_lookup_path = (
-            f"data/{task_name}/{task_set}_{ngrams_n_size}grams_limit{limit}.lookup"
-        )
+        task_set_lookup_path = f"{output_dir}/{task_name}/{task_set}_{ngrams_n_size}grams_limit{limit}.lookup"
         if os.path.exists(task_set_lookup_path):
             print(f"{task_set_lookup_path} available, loading...")
             lookups[(task_name, task_set)] = pickle.load(
@@ -135,9 +139,13 @@ def get_train_overlap(docs_by_task_set: dict, ngrams_path: str, limit: int) -> d
                         matching_unique += 1
                         for task_name, task_set, doc_ids in merged_lookup[ngram]:
                             task_doc_set = duplicates[(task_name, task_set)]
-                            for doc_id in doc_ids:  # Record contamination across all relevant task/set combos
-                                task_doc_set.add(doc_id)
-                        del merged_lookup[ngram]  # No point matching again
+                            for (
+                                doc_id
+                            ) in (
+                                doc_ids
+                            ):  # Record contamination across all relevant task/set combos
+                                task_doc_set.add((ngram, doc_id, document_id))
+                        # del merged_lookup[ngram]  # No point matching again
                     else:
                         non_matching_unique += 1
 
@@ -162,5 +170,103 @@ def get_train_overlap(docs_by_task_set: dict, ngrams_path: str, limit: int) -> d
             )
             pickle.dump(doc_ids, open(overlaps_dump_path, "wb"))
 
-    # Strip task set and return
-    return {task_name: doc_ids for (task_name, task_set), doc_ids in duplicates.items()}
+    # Dump the contaminated source documents
+    source_doc = {}  # map doc -> bencharmk -> list[ngram]
+    for (task_name, task_set), doc_ids in duplicates.items():
+        for ngram, doc_id, document_id in doc_ids:
+            document_id = int(document_id)
+            if document_id not in source_doc:
+                source_doc[document_id] = {}
+            key = (task_name, task_set, doc_id)
+            if key not in source_doc[document_id]:
+                source_doc[document_id][key] = []
+            source_doc[document_id][key].append(ngram)
+    # fo each source_doc, keep the key with longest ngram, keep rest of the keys in a sepaate list
+    for doc_id, benchmarks in source_doc.items():
+        max_len = 0
+        max_key = None
+        max_ngrams = None
+        all_tasks = []
+        for key, ngrams in benchmarks.items():
+            all_tasks.append(key)
+            if len(ngrams) > max_len:
+                max_len = len(ngrams)
+                max_key = key
+                max_ngrams = ngrams
+        source_doc[doc_id] = (max_key, max_ngrams, all_tasks)
+
+    return source_doc
+
+
+def get_task_doc(task_name, excluded_configs, split, column, datasets):
+    all_configs = get_dataset_config_names(task_name)
+    include_configs = [
+        config for config in all_configs if config not in excluded_configs
+    ]
+    for config_name in include_configs:
+        datasets[(task_name.replace("/", "_"), config_name)] = load_dataset(
+            task_name, name=config_name, split=split
+        )[column]
+    return datasets
+
+
+if __name__ == "__main__":
+
+    parser = argparse.ArgumentParser(description="dedup dataset based on ngram.")
+    parser.add_argument(
+        "-indir",
+        "--input_directory",
+        default=os.path.expanduser("~/datasets/latent/sft_2.8m_dedup"),
+    )
+    parser.add_argument(
+        "-ngram", "--ngram_directory", default="decontaminate_latent/zst"
+    )
+    parser.add_argument(
+        "-outdir", "--output_directory", default="decontaminate_latent/matched"
+    )
+    args = parser.parse_args()
+
+    tasks = {}
+    tasks = get_task_doc(
+        "cais/mmlu", ["all", "auxiliary_train"], "test", "question", tasks
+    )
+    tasks = get_task_doc(
+        "Idavidrein/gpqa",
+        ["gpqa_diamond", "gpqa_experts", "gpqa_extended"],
+        "train",
+        "Question",
+        tasks,
+    )
+    tasks = get_task_doc("EleutherAI/hendrycks_math", [], "test", "problem", tasks)
+
+    for (task_name, task_set), docs in tasks.items():
+        print(f"{task_name} {task_set} {len(docs)}")
+
+    source_doc = get_train_overlap(
+        tasks,
+        args.ngram_directory,
+        output_dir=args.output_directory,
+        limit=1,
+    )
+
+    source_doc_list = []
+    for offset, document in yield_pile(args.input_directory, 0, 0):
+        if offset in source_doc:
+            key, ngrams, all_overlap_tasks = source_doc[offset]
+            task_name, task_set, task_doc_id = key
+            source_doc_list.append(
+                {
+                    "doc_id": offset,
+                    "source_doc": document,
+                    "task_name": task_name,
+                    "task_set": task_set,
+                    "task_doc_id": key[2],
+                    "task_doc": tasks[(task_name, task_set)][task_doc_id],
+                    "ngrams": ngrams,
+                    "all_overlap_tasks": all_overlap_tasks,
+                }
+            )
+
+    # write the source_doc_list to a file
+    with open(os.path.join(args.output_directory, "final_overlap.json"), "w") as f:
+        json.dump(source_doc_list, f, indent=2)

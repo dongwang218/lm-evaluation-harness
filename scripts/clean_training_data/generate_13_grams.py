@@ -31,11 +31,11 @@ import sys
 from pathlib import Path
 from signal import SIGINT
 
-from tqdm import tqdm
-from tqdm_multiprocess.logger import setup_logger_tqdm
-
 from lm_eval.decontamination.archiver import Reader, TextArchive
 from lm_eval.decontamination.janitor import Janitor, word_ngrams
+
+from tqdm import tqdm
+from tqdm_multiprocess.logger import setup_logger_tqdm
 
 
 logger = logging.getLogger(__name__)
@@ -48,8 +48,7 @@ def handler(signal_received, frame):
     terminate = True
 
 
-def yield_pile(start_offsets=None, checkpoint_offset=None):
-    directory = "pile"
+def yield_pile(directory="pile", start_offsets=None, checkpoint_offset=None):
 
     if not os.path.exists(directory):
         print(
@@ -58,6 +57,7 @@ def yield_pile(start_offsets=None, checkpoint_offset=None):
         raise FileNotFoundError("Pile directory not found.")
 
     files = list(sorted(glob.glob(os.path.join(directory, "*.jsonl.zst*"))))
+    files += list(sorted(glob.glob(os.path.join(directory, "*.jsonl"))))
 
     pile_global_offset = 0
     start_file = 0
@@ -118,7 +118,7 @@ class Buckets:
             bucket.commit()
 
 
-def do_ngrams_in_buckets(n_value, working_directory, bucket_count):
+def do_ngrams_in_buckets(input_directory, n_value, working_directory, bucket_count):
     pile_statistics = json.load(open("pile_statistics.json", "r", encoding="utf-8"))
     pile_document_count = pile_statistics["Document Count"]
     start_offsets = pile_statistics["File Start Offsets"]
@@ -151,7 +151,9 @@ def do_ngrams_in_buckets(n_value, working_directory, bucket_count):
     batch_counter = 0
 
     with tqdm(total=checkpoint_offset, dynamic_ncols=True, unit="docs") as progress:
-        for offset, document in yield_pile(start_offsets, checkpoint_offset):
+        for offset, document in yield_pile(
+            input_directory, start_offsets, checkpoint_offset
+        ):
             if iterate:
                 logger.info(f"Iterating to offset {checkpoint_offset} from {offset}")
                 progress.update(offset)
@@ -188,12 +190,12 @@ def do_ngrams_in_buckets(n_value, working_directory, bucket_count):
     Path(done_file).touch()
 
 
-parser = argparse.ArgumentParser(description="Generate 13 grams from Pile.")
-parser.add_argument("-dir", "--working_directory", default="")
-parser.add_argument("-n", "--n_value", type=int, default=13)
-parser.add_argument("-buckets", "--bucket_count", type=int, default=500)
-
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Generate 13 grams from Pile.")
+    parser.add_argument("-indir", "--input_directory", default="pile")
+    parser.add_argument("-dir", "--working_directory", default="")
+    parser.add_argument("-n", "--n_value", type=int, default=13)
+    parser.add_argument("-buckets", "--bucket_count", type=int, default=500)
     version = 1.00
     print(f"Running version {version}")
 
@@ -208,7 +210,9 @@ if __name__ == "__main__":
     setup_logger_tqdm(logfile_path)
 
     args = parser.parse_args()
-    do_ngrams_in_buckets(args.n_value, args.working_directory, args.bucket_count)
+    do_ngrams_in_buckets(
+        args.input_directory, args.n_value, args.working_directory, args.bucket_count
+    )
 
     info_dict = {"title": "dataset ngrams", "ngram_size": 13}
     info_dict_path = os.path.join(args.working_directory, "info.json")

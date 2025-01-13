@@ -60,8 +60,11 @@ class Reader:
     ):
         with open(file, "rb") as fh:
             self.fh = fh
-            cctx = zstandard.ZstdDecompressor()
-            reader = io.BufferedReader(cctx.stream_reader(fh))
+            if file.endswith(".zst"):
+                cctx = zstandard.ZstdDecompressor()
+                reader = io.BufferedReader(cctx.stream_reader(fh))
+            else:
+                reader = io.BufferedReader(fh)
             rdr = jsonlines.Reader(reader)
             for ob in rdr:
                 # naive jsonl where each object is just the string itself, with no meta. For legacy compatibility.
@@ -70,7 +73,21 @@ class Reader:
                     yield ob
                     continue
 
-                text = ob["text"]
+                if "text" in ob:
+                    text = ob["text"]
+                else:
+                    assert "src" in ob
+                    prefix = (
+                        "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n"
+                    )
+                    suffix = (
+                        "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+                    )
+                    text = ob["src"]
+                    if text.startswith(prefix):
+                        text = text[len(prefix) :]
+                    if text.endswith(suffix):
+                        text = text[: -len(suffix)]
 
                 if autojoin_paragraphs and isinstance(text, list):
                     text = para_joiner.join(text)
