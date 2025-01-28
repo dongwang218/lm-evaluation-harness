@@ -222,11 +222,17 @@ if __name__ == "__main__":
         "-ngram", "--ngram_directory", default="decontaminate_latent/zst"
     )
     parser.add_argument(
-        "-outdir", "--output_directory", default="decontaminate_latent/matched"
+        "-outdir", "--output_directory", default="decontaminate_latent/matched2"
+    )
+    parser.add_argument(
+        "-taskdir",
+        "--task_directory",
+        default=os.path.expanduser("~/datasets/latent/song_benchmarks"),
     )
     args = parser.parse_args()
 
     tasks = {}
+    """
     tasks = get_task_doc(
         "cais/mmlu", ["all", "auxiliary_train"], "test", "question", tasks
     )
@@ -238,6 +244,19 @@ if __name__ == "__main__":
         tasks,
     )
     tasks = get_task_doc("EleutherAI/hendrycks_math", [], "test", "problem", tasks)
+    """
+    # use the jsonl file to get the tasks
+    task_definition = {
+        "MATH": ("problem", "data/MATH/math_test.jsonl"),
+        "GPQA-Diamond": ("Question", "data/gpqa/test_diamond.jsonl"),
+        "MMLU_pro": ("question", "data/mmlu_pro/test.jsonl"),
+        "MMLU_stem": ("question", "data/mmlu_stem/test.jsonl"),
+    }
+    for task_name, (column, path) in task_definition.items():
+        tasks[(task_name, "test")] = []
+        with open(os.path.join(args.task_directory, path), "r", encoding="utf-8") as f:
+            for line in f:
+                tasks[(task_name, "test")].append(json.loads(line)[column])
 
     for (task_name, task_set), docs in tasks.items():
         print(f"{task_name} {task_set} {len(docs)}")
